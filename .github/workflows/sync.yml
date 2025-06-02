@@ -1,0 +1,88 @@
+name: Sync NPS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'NPS Release Tag (eg. v0.29.0)'
+        required: true
+  repository_dispatch:
+    types: [sync_nps_release]
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Determine TAG_NAME
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAG_NAME=${{ github.event.client_payload.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clean old assets
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          find . -maxdepth 1 -type f \
+            \( -iname '*.zip' -o -iname '*.tar.gz' -o -iname '*.tgz' \
+             -o -iname '*.tar.xz' -o -iname '*.tar.bz2' \
+             -o -iname '*.apk' -o -iname '*.ipk' \) \
+            -print0 | xargs -0 rm -vf || true
+
+      - name: Download assets from djylb/nps@${{ steps.vars.outputs.TAG_NAME }}
+        env:
+          TAG: ${{ steps.vars.outputs.TAG_NAME }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          api_url="https://api.github.com/repos/djylb/nps/releases/tags/${TAG}"
+          echo "Fetching release info from $api_url"
+          assets=$(curl -s "$api_url" | jq -r '.assets[] | .browser_download_url')
+
+          if [ -z "$assets" ] || [ "$assets" = "null" ]; then
+            echo "No assets found for tag $TAG" >&2
+            exit 1
+          fi
+
+          for url in $assets; do
+            filename=$(basename "$url")
+            echo "Downloading $filename"
+            curl -L "$url" -o "./$filename"
+          done
+
+      - name: Set Git user
+        run: |
+          git config --global user.name "djylb"
+          git config --global user.email "duan@d-jy.net"
+
+      - name: Delete existing tag locally and remotely
+        env:
+          TAG: ${{ steps.vars.outputs.TAG_NAME }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git tag -d "${TAG}" || true
+          git push origin :refs/tags/"${TAG}" || true
+
+      - name: Commit & Create Tag
+        env:
+          TAG: ${{ steps.vars.outputs.TAG_NAME }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git add -A
+          git commit -m "Mirror djylb/nps release ${TAG}" || echo "No changes to commit"
+          git tag -a "${TAG}" -m "Mirror djylb/nps release ${TAG}"
+
+      - name: Push changes & tags
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git push origin --atomic --follow-tags
